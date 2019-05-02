@@ -1,3 +1,4 @@
+import datetime
 import logging
 
 import pytz
@@ -12,6 +13,11 @@ from .utils.time import is_naive
 
 logger = logging.getLogger(__name__)
 
+def astimezone(x):
+    if isinstance(x, datetime.tzinfo):
+        return x
+    # attempt to coerce
+    return pytz.timezone(x)
 
 class tzcrontab(schedules.BaseSchedule):
     def __init__(self, expression, tz=None, *args, **kwargs):
@@ -34,7 +40,7 @@ class tzcrontab(schedules.BaseSchedule):
 
     @cached_property
     def tz(self):
-        return self.timezone or self.app.timezone
+        return self.timezone or astimezone(self.app.timezone)
 
     def __repr__(self):
         template = "<{}: {} @{}>"
@@ -57,8 +63,20 @@ class tzcrontab(schedules.BaseSchedule):
     def remaining_estimate(self, last_run_at):
         # make a schedule from the cron expression, starting now
         # any events we might have missed since `last_run_at` are ignored
+
+        assert not is_naive(last_run_at), "Please, don't use naive datetimes!"
+
         now = self.now()
-        event_datetimes = tzcron.Schedule(self.expression, self.tz, now)
+
+        # We are only interested in the next event strictly greater than the
+        # last_run_at time.
+        start_date = max(now, last_run_at + datetime.timedelta(seconds=1))
+
+        event_datetimes = tzcron.Schedule(
+            expression = self.expression,
+            t_zone = self.tz,
+            start_date = start_date,
+        )
         logger.debug('new schedule from cron expression: %s', event_datetimes)
 
         try:
@@ -86,17 +104,30 @@ class tzcrontab(schedules.BaseSchedule):
 
     def is_due(self, last_run_at):
         """
-        Return tuple of `(is_due, remaining_delta)`.
+        Return tuple of `(due, remaining_delta)`.
         """
-        remaining_delta = self.remaining_estimate(last_run_at)
-        if remaining_delta:
-            remaining_seconds = max(remaining_delta.total_seconds(), 0)
-            is_due = remaining_seconds == 0
-            logger.debug('is_due: %s, remaining: %s', is_due, remaining_seconds)
-            return is_due, remaining_seconds
 
-        # when determined time was ambiguous or non-existent
-        return False, 0
+        # assert not is_naive(last_run_at), "Please, don't use naive datetimes!"
+
+        remaining_delta = self.remaining_estimate(last_run_at)
+        if remaining_delta is None:
+            # when determined time was ambiguous or non-existent
+            return schedules.schedstate(False, 0) # should this be False, INF ?
+
+        remaining_seconds = max(remaining_delta.total_seconds(), 0)
+        due = remaining_seconds == 0
+        logger.debug('due: %s, remaining: %s', due, remaining_seconds)
+        if due:
+            rem_delta = self.remaining_estimate(self.now())
+            remaining_seconds = max(rem_delta.total_seconds(), 0)
+        return schedules.schedstate(due, remaining_seconds)
+
+
+def _expand_token(arg):
+    if isinstance(arg, (list, tuple)):
+        return ','.join(map(str, arg))
+    else:
+        return str(arg)
 
 
 class pytzcrontab(tzcrontab):
@@ -116,8 +147,15 @@ class pytzcrontab(tzcrontab):
         :param tz: timezone as string (eg. 'Europe/Vienna') or `pytz.timezone`
         """
         expression = ' '.join([
-            str(arg) for arg
+            _expand_token(arg) for arg
             in (minute, hour, day_of_month, month_of_year, day_of_week, year)
         ])
+
+        self.hour = schedules.crontab._expand_cronspec(hour, 24)
+        self.minute = schedules.crontab._expand_cronspec(minute, 60)
+        self.day_of_week = schedules.crontab._expand_cronspec(day_of_week, 7)
+        self.day_of_month = schedules.crontab._expand_cronspec(day_of_month, 31, 1)
+        self.month_of_year = schedules.crontab._expand_cronspec(month_of_year, 12, 1)
+
         super(pytzcrontab, self).__init__(expression, tz=tz, *args, **kwargs)
         
