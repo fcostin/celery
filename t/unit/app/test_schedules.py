@@ -26,6 +26,18 @@ def patch_crontab_nowfun(cls, retval):
         cls.nowfun = prev_nowfun
 
 
+def is_time_feasible_wrt_crontab_schedule(t, z):
+    # z : celery.schedules.crontab instance
+    t = z.maybe_make_aware(t)
+    return (
+        t.month in z.month_of_year and
+        (t.isoweekday() % 7) in z.day_of_week and
+        t.day in z.day_of_month and
+        t.hour in z.hour and
+        t.minute in z.minute
+    )
+
+
 @skip.unless_module('ephem')
 class test_solar:
 
@@ -803,3 +815,58 @@ class test_crontab_is_due:
             due, remaining = self.yearly.is_due(datetime(2009, 3, 12, 7, 30))
             assert not due
             assert remaining == 4 * 24 * 60 * 60 - 3 * 60 * 60
+
+    @skip.todo('FIXME crontab logic is defective when last_run_at is older than the most recent feasible time wrt schedule')
+    def test_daily_execution_if_last_run_at_was_days_ago_and_current_time_does_not_match_crontab_schedule_then_execution_is_not_due(self):
+        z = self.crontab(hour=7, minute=30)
+        last_run_at = datetime(2018, 6, 1, 7, 30)
+        now = datetime(2018, 6, 9, 23, 48)
+        expected_next_execution_time = datetime(2018, 6, 10, 7, 30)
+        expected_remaining = (expected_next_execution_time - now).total_seconds()
+        # check our assumptions
+        assert is_time_feasible_wrt_crontab_schedule(last_run_at, z)
+        assert not is_time_feasible_wrt_crontab_schedule(now, z)
+        assert is_time_feasible_wrt_crontab_schedule(expected_next_execution_time, z)
+        assert now < expected_next_execution_time
+        assert expected_remaining == (7 * 60 + 30 + 12) * 60
+        # test is_due
+        with patch_crontab_nowfun(z, now):
+            due, remaining = z.is_due(last_run_at=last_run_at)
+            assert remaining == expected_remaining
+            assert not due
+
+    def test_daily_execution_if_last_run_at_was_the_most_recent_feasible_time_wrt_schedule_in_past_and_current_time_does_not_match_crontab_schedule_then_execution_is_not_due(self):
+        z = self.crontab(hour=7, minute=30)
+        last_run_at = datetime(2018, 6, 9, 7, 30)
+        now = datetime(2018, 6, 9, 23, 48)
+        expected_next_execution_time = datetime(2018, 6, 10, 7, 30)
+        expected_remaining = (expected_next_execution_time - now).total_seconds()
+        # check our assumptions
+        assert is_time_feasible_wrt_crontab_schedule(last_run_at, z)
+        assert not is_time_feasible_wrt_crontab_schedule(now, z)
+        assert is_time_feasible_wrt_crontab_schedule(expected_next_execution_time, z)
+        assert now < expected_next_execution_time
+        assert expected_remaining == (7 * 60 + 30 + 12) * 60
+        # test is_due
+        with patch_crontab_nowfun(z, now):
+            due, remaining = z.is_due(last_run_at=last_run_at)
+            assert remaining == expected_remaining
+            assert not due
+
+    def test_daily_execution_if_last_run_at_was_more_recent_than_the_most_recent_feasible_time_wrt_schedule_in_past_and_current_time_does_not_match_crontab_schedule_then_execution_is_not_due(self):
+        z = self.crontab(hour=7, minute=30)
+        last_run_at = datetime(2018, 6, 9, 10, 30) # not feasible wrt to current schedule. case can happen if schedule is modified after a run
+        now = datetime(2018, 6, 9, 23, 48)
+        expected_next_execution_time = datetime(2018, 6, 10, 7, 30)
+        expected_remaining = (expected_next_execution_time - now).total_seconds()
+        # check our assumptions
+        assert not is_time_feasible_wrt_crontab_schedule(last_run_at, z)
+        assert not is_time_feasible_wrt_crontab_schedule(now, z)
+        assert is_time_feasible_wrt_crontab_schedule(expected_next_execution_time, z)
+        assert now < expected_next_execution_time
+        assert expected_remaining == (7 * 60 + 30 + 12) * 60
+        # test is_due
+        with patch_crontab_nowfun(z, now):
+            due, remaining = z.is_due(last_run_at=last_run_at)
+            assert remaining == expected_remaining
+            assert not due
